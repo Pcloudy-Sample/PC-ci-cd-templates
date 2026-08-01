@@ -1,0 +1,235 @@
+// ============================================================
+// pCloudy Device Cloud — Open Source Test Execution
+// Jenkins Pipeline Template (Declarative)
+//
+// Supports: Appium (mobile), Selenium (web), Playwright (web)
+//
+// Required Jenkins Credentials (Manage Jenkins → Credentials):
+//   pcloudy-username   - Secret Text: your pCloudy email
+//   pcloudy-api-key    - Secret Text: API key from pCloudy dashboard
+//
+// Suggested Jenkins Parameters (configured in job):
+//   PLATFORM           - android | ios
+//   ENABLE_APP_UPLOAD  - true | false
+//   APP_UPLOAD_SOURCE  - app_directory | storage
+//   APP_PATH           - path to APK/IPA in workspace (app_directory source)
+//   APP_STORAGE_URL    - direct URL to APK/IPA (storage source)
+//   EXISTING_APP_NAME  - pCloudy app name when upload is disabled
+//   DEVICE_MANUFACTURER - single fallback manufacturer
+//   DEVICE_MANUFACTURERS - CSV mapped to TestNG tests by order
+// ============================================================
+
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'CLOUD_HOST', defaultValue: 'device.pcloudy.com', description: 'pCloudy host without protocol')
+        choice(name: 'PLATFORM', choices: ['android', 'ios'], description: 'Target mobile platform')
+        choice(name: 'ENABLE_APP_UPLOAD', choices: ['false', 'true'], description: 'Upload app before execution')
+        choice(name: 'APP_UPLOAD_SOURCE', choices: ['app_directory', 'storage'], description: 'App upload source when enabled')
+        string(name: 'APP_PATH', defaultValue: 'app/build/app-release.apk', description: 'Path to APK/IPA in workspace')
+        string(name: 'APP_STORAGE_URL', defaultValue: '', description: 'Storage URL for APK/IPA when source=storage')
+        string(name: 'EXISTING_APP_NAME', defaultValue: '', description: 'Existing app name when upload is disabled')
+        choice(name: 'IOS_TRUST_APP', choices: ['false', 'true'], description: 'iOS trusted app mode')
+        string(name: 'RESIGN_POLL_INTERVAL_SEC', defaultValue: '15', description: 'iOS resign poll interval')
+        string(name: 'RESIGN_TIMEOUT_MIN', defaultValue: '30', description: 'iOS resign timeout minutes')
+        string(name: 'DEVICE_MANUFACTURER', defaultValue: 'GOOGLE', description: 'Single manufacturer fallback')
+        string(name: 'DEVICE_MANUFACTURERS', defaultValue: 'GOOGLE,SAMSUNG', description: 'CSV manufacturers mapped to TestNG tests')
+    }
+
+    environment {
+        PCLOUDY_USERNAME  = credentials('pcloudy-username')
+        PCLOUDY_API_KEY   = credentials('pcloudy-api-key')
+    }
+
+    stages {
+
+        // ── Stage 1: Resolve App Name (Upload or Existing) ───
+        stage('Resolve App') {
+            steps {
+                script {
+                    env.PCLOUDY_API_BASE = "https://${params.CLOUD_HOST}/api"
+                    env.PCLOUDY_HUB = "https://${params.CLOUD_HOST}/appiumcloud/wd/hub"
+
+                    if (params.ENABLE_APP_UPLOAD == 'true') {
+                        def accessResponse = sh(
+                            script: """
+                                curl -s -u "${env.PCLOUDY_USERNAME}:${env.PCLOUDY_API_KEY}" "https://${params.CLOUD_HOST}/api/access"
+                            """,
+                            returnStdout: true
+                        ).trim()
+
+                        def accessJson = readJSON(text: accessResponse)
+                        env.AUTH_TOKEN = (accessJson?.result?.token ?: accessJson?.token ?: '') as String
+                        if (!env.AUTH_TOKEN?.trim()) {
+                            error("Unable to fetch API token from /api/access response: ${accessResponse}")
+                        }
+
+                        String appPath
+                        if (params.APP_UPLOAD_SOURCE == 'storage') {
+                            if (!params.APP_STORAGE_URL?.trim()) {
+                                error('APP_STORAGE_URL is required when APP_UPLOAD_SOURCE=storage')
+                            }
+                            String fileName = params.APP_STORAGE_URL.tokenize('?')[0].tokenize('/').last()
+                            if (!fileName) {
+                                fileName = 'app-under-test.apk'
+                            }
+                            appPath = "${env.WORKSPACE}/.tmp/${fileName}"
+                            sh """
+                                mkdir -p "${env.WORKSPACE}/.tmp"
+                                curl -fL "${params.APP_STORAGE_URL}" -o "${appPath}"
+                            """
+                        } else {
+                            appPath = "${env.WORKSPACE}/${params.APP_PATH}"
+                        }
+
+                        if (!fileExists(appPath)) {
+                            error("App file not found at: ${appPath}")
+                        }
+
+                        def uploadResponse = sh(
+                            script: """
+                                curl -s -X POST "https://${params.CLOUD_HOST}/api/upload_file" \\
+                                  -F "file=@${appPath}" \\
+                                  -F "source_type=raw" \\
+                                  -F "token=${env.AUTH_TOKEN}" \\
+                                  -F "filter=all"
+                            """,
+                            returnStdout: true
+                        ).trim()
+
+                        def uploadJson = readJSON(text: uploadResponse)
+                        env.APP_NAME = (uploadJson?.result?.file ?: uploadJson?.result?.name ?: uploadJson?.file ?: uploadJson?.name ?: '') as String
+                    } else {
+                        env.APP_NAME = params.EXISTING_APP_NAME ?: ''
+                    }
+
+                    if (!env.APP_NAME?.trim()) {
+                        error('App name is empty. Set EXISTING_APP_NAME when upload is disabled, or enable upload.')
+                    }
+
+                    if (params.PLATFORM == 'ios' && params.IOS_TRUST_APP != 'true' && env.APP_NAME.endsWith('.ipa')) {
+                        String token = env.AUTH_TOKEN
+                        if (!token?.trim()) {
+                            def accessResponse = sh(
+                                script: """
+                                    curl -s -u "${env.PCLOUDY_USERNAME}:${env.PCLOUDY_API_KEY}" "https://${params.CLOUD_HOST}/api/access"
+                                """,
+                                returnStdout: true
+                            ).trim()
+                            def accessJson = readJSON(text: accessResponse)
+                            token = (accessJson?.result?.token ?: accessJson?.token ?: '') as String
+                        }
+                        if (!token?.trim()) {
+                            error('Unable to fetch API token for iOS resign')
+                        }
+
+                        int pollInterval = params.RESIGN_POLL_INTERVAL_SEC.isInteger() ? params.RESIGN_POLL_INTERVAL_SEC.toInteger() : 15
+                        int timeoutMin = params.RESIGN_TIMEOUT_MIN.isInteger() ? params.RESIGN_TIMEOUT_MIN.toInteger() : 30
+                        pollInterval = pollInterval > 0 ? pollInterval : 15
+                        timeoutMin = timeoutMin > 0 ? timeoutMin : 30
+
+                        def initPayload = groovy.json.JsonOutput.toJson([token: token, filename: env.APP_NAME])
+                        def initResponse = sh(
+                            script: """
+                                curl -s -X POST "https://${params.CLOUD_HOST}/api/resign/initiate" \\
+                                  -H "Content-Type: application/json" \\
+                                  -d '${initPayload}'
+                            """,
+                            returnStdout: true
+                        ).trim()
+                        def initJson = readJSON(text: initResponse)
+                        String resignToken = (initJson?.result?.resign_token ?: '') as String
+                        String resignFile = (initJson?.result?.resign_filename ?: '') as String
+                        if (!resignToken || !resignFile) {
+                            error("Failed to initiate iOS resign: ${initResponse}")
+                        }
+
+                        env.APP_NAME = resignFile
+                        long start = System.currentTimeMillis()
+                        while (true) {
+                            def progressPayload = groovy.json.JsonOutput.toJson([token: token, resign_token: resignToken, filename: env.APP_NAME])
+                            def progressResponse = sh(
+                                script: """
+                                    curl -s -X POST "https://${params.CLOUD_HOST}/api/resign/progress" \\
+                                      -H "Content-Type: application/json" \\
+                                      -d '${progressPayload}'
+                                """,
+                                returnStdout: true
+                            ).trim()
+                            def progressJson = readJSON(text: progressResponse)
+                            int status = (progressJson?.result?.resign_status ?: 0) as int
+                            if (status >= 100) {
+                                break
+                            }
+                            long elapsedSec = (System.currentTimeMillis() - start) / 1000
+                            if (elapsedSec >= timeoutMin * 60) {
+                                error("iOS resign did not reach 100% within ${timeoutMin} minute(s): ${progressResponse}")
+                            }
+                            sleep time: pollInterval, unit: 'SECONDS'
+                        }
+                    }
+
+                    echo "Using app: ${env.APP_NAME}"
+                }
+            }
+        }
+
+        // ── Stage 2: Run Tests (TestNG parallel in suite) ───
+        stage('Run Tests') {
+            steps {
+                sh """
+                    mvn test \\
+                      -Dplatform=${params.PLATFORM} \\
+                      -DappiumHub=${env.PCLOUDY_HUB} \\
+                      -DpCloudyUsername=${env.PCLOUDY_USERNAME} \\
+                      -DpCloudyApiKey=${env.PCLOUDY_API_KEY} \\
+                      -DappiumTrust=${params.IOS_TRUST_APP} \\
+                      -DpCloudyDeviceManufacturer=${params.DEVICE_MANUFACTURER} \\
+                      -DpCloudyDeviceManufacturers='${params.DEVICE_MANUFACTURERS}' \\
+                      -DpCloudyApplicationName='${env.APP_NAME}'
+                """
+            }
+        }
+
+        // ── Stage 3: Publish Results ──────────────────────────
+        stage('Publish Results') {
+            steps {
+                // Publish JUnit test results
+                junit allowEmptyResults: true, testResults: '**/surefire-reports/*.xml'
+
+                // Archive HTML reports if present
+                archiveArtifacts artifacts: '**/test-results/**', allowEmptyArchive: true
+
+                // Publish Allure report (if Allure Jenkins plugin installed)
+                // allure includeProperties: false, jdk: '', results: [[path: 'allure-results']]
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                // Print execution summary
+                echo """
+                ═══════════════════════════════════
+                pCloudy Test Execution Summary
+                Platform  : ${params.PLATFORM}
+                App       : ${env.APP_NAME ?: 'N/A'}
+                Manufacturer Fallback : ${params.DEVICE_MANUFACTURER}
+                Manufacturers CSV     : ${params.DEVICE_MANUFACTURERS}
+                ═══════════════════════════════════
+                """
+            }
+        }
+        failure {
+            // Notify on failure — configure your notification plugin
+            echo "Tests failed — check pCloudy dashboard for device logs and video recordings"
+            // emailext to: 'qa-team@yourcompany.com', subject: "FAILED: ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+            // slackSend channel: '#qa-alerts', message: "Test run FAILED: ${env.JOB_NAME}"
+        }
+        success {
+            echo "All tests passed on pCloudy device cloud"
+        }
+    }
+}

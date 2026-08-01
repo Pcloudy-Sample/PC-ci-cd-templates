@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE suite SYSTEM "https://testng.org/testng-1.0.dtd">
+<suite name="pCloudy Selenium Suite" parallel="tests" thread-count="2">
+  <test name="Selenium Session 1 - Windows">
+    <parameter name="os" value="Windows"/>
+    <parameter name="browserName" value="chrome"/>
+    <parameter name="userName" value="${userName}"/>
+    <parameter name="accessKey" value="${accessKey}"/>
+    <parameter name="baseUrl" value="${baseUrl}"/>
+    <parameter name="project" value="${project1}"/>
+    <parameter name="build" value="${build1}"/>
+    <parameter name="name" value="${name1}"/>
+    <parameter name="tag" value="${tag1}"/>
+    <classes>
+      <class name="com.pcloudy.testng.Runner"/>
+    </classes>
+  </test>
+
+  <test name="Selenium Session 2 - Mac">
+    <parameter name="os" value="Mac"/>
+    <parameter name="browserName" value="safari"/>
+    <parameter name="userName" value="${userName}"/>
+    <parameter name="accessKey" value="${accessKey}"/>
+    <parameter name="baseUrl" value="${baseUrl}"/>
+    <parameter name="project" value="${project2}"/>
+    <parameter name="build" value="${build2}"/>
+    <parameter name="name" value="${name2}"/>
+    <parameter name="tag" value="${tag2}"/>
+    <classes>
+      <class name="com.pcloudy.testng.Runner"/>
+    </classes>
+  </test>
+</suite>

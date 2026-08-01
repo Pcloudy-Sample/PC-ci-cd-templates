@@ -1,0 +1,89 @@
+# ============================================================
+# pCloudy QPilot - Run Collection
+# GitLab CI/CD Template (.gitlab-ci.yml)
+#
+# Flow:
+#   1. Accept host + collection inputs as CI variables
+#   2. Resolve API host and origin header
+#   3. Trigger collection run via /api/v2/collection/run
+# ============================================================
+
+variables:
+  CLOUD_HOST: "device.pcloudy.com"
+  COLLECTION_ID: ""
+  COLLECTION_CONFIG_ID: ""
+
+stages:
+  - run
+
+run-qpilot-collection:
+  stage: run
+  image: python:3.11-alpine
+  script:
+    - |
+      set -euo pipefail
+
+      HOST="$CLOUD_HOST"
+
+      case "$HOST" in
+        "device.pcloudy.com")
+          API_HOST="qpilot-backend.device.pcloudy.com"
+          ORIGIN="https://qpilot.device.pcloudy.com"
+          ;;
+        "ind-west.pcloudy.com"|"us.pcloudy.com"|"sg.pcloudy.com"|"uae.pcloudy.com")
+          API_HOST="qpilot-backend.${HOST}"
+          ORIGIN="https://qpilot.device.pcloudy.com"
+          ;;
+        "qpilot-backend.device.pcloudy.com")
+          API_HOST="qpilot-backend.device.pcloudy.com"
+          ORIGIN="https://qpilot.device.pcloudy.com"
+          ;;
+        *)
+          echo "Unknown CLOUD_HOST: $HOST"
+          echo "Allowed hosts: device.pcloudy.com, ind-west.pcloudy.com, us.pcloudy.com, sg.pcloudy.com, uae.pcloudy.com, qpilot-backend.device.pcloudy.com"
+          exit 1
+          ;;
+      esac
+
+      if [ -z "$COLLECTION_ID" ] || [ -z "$COLLECTION_CONFIG_ID" ]; then
+        echo "COLLECTION_ID and COLLECTION_CONFIG_ID are required"
+        exit 1
+      fi
+
+      if [ -z "${PCLOUDY_TOKEN:-}" ]; then
+        echo "Missing PCLOUDY_TOKEN CI/CD variable"
+        exit 1
+      fi
+
+      REQUEST_PAYLOAD="{\"collectionId\": \"$COLLECTION_ID\", \"collectionConfigId\": \"$COLLECTION_CONFIG_ID\"}"
+
+      echo "Input Host:           $HOST"
+      echo "QPilot Backend Host:  $API_HOST"
+      echo "Origin:               $ORIGIN"
+      echo "Collection ID:        $COLLECTION_ID"
+      echo "Collection Config ID: $COLLECTION_CONFIG_ID"
+      echo "Collection run request:"
+      echo "POST https://${API_HOST}/api/v2/collection/run"
+      echo "Headers: content-type=application/json, origin=${ORIGIN}, token=***"
+      echo "Body: $REQUEST_PAYLOAD"
+
+      HTTP_STATUS=$(curl --silent --output /tmp/response.json \
+        --write-out "%{http_code}" \
+        --request POST \
+        --url "https://${API_HOST}/api/v2/collection/run" \
+        --header "content-type: application/json" \
+        --header "origin: ${ORIGIN}" \
+        --header "token: ${PCLOUDY_TOKEN}" \
+        --data "$REQUEST_PAYLOAD")
+
+      echo "HTTP Status: $HTTP_STATUS"
+      echo "API Response:"
+      python3 -m json.tool /tmp/response.json || cat /tmp/response.json
+
+      if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
+        echo "Request failed with HTTP $HTTP_STATUS"
+        exit 1
+      fi
+
+  rules:
+    - when: manual

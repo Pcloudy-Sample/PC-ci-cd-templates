@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE suite SYSTEM "http://testng.org/testng-1.0.dtd">
+<suite thread-count="2" configfailurepolicy="continue" name="pCloudy Suite" parallel="tests">
+  <test name="Test-Google">
+    <parameter name="pCloudyUsername" value="${pCloudyUsername}"/>
+    <parameter name="pCloudyApiKey" value="${pCloudyApiKey}"/>
+    <parameter name="appiumHub" value="${appiumHub}"/>
+    <parameter name="pCloudyDeviceManufacturer" value="${pCloudyDeviceManufacturer}"/>
+    <parameter name="pCloudyApplicationName" value="${pCloudyApplicationName}"/>
+    <classes>
+      <class name="com.pcloudy.testng.Runner"/>
+    </classes>
+  </test> <!-- Test-Google -->
+
+  <test name="Test-Samsung">
+    <parameter name="pCloudyUsername" value="${pCloudyUsername}"/>
+    <parameter name="pCloudyApiKey" value="${pCloudyApiKey}"/>
+    <parameter name="appiumHub" value="${appiumHub}"/>
+    <parameter name="pCloudyDeviceManufacturer" value="${pCloudyDeviceManufacturer}"/>
+    <parameter name="pCloudyApplicationName" value="${pCloudyApplicationName}"/>
+    <classes>
+      <class name="com.pcloudy.testng.Runner"/>
+    </classes>
+  </test> <!-- Test-Samsung -->
+</suite> <!-- Suite -->

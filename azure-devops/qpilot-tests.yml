@@ -1,0 +1,124 @@
+# ============================================================
+# pCloudy QPilot - Run Collection
+# Azure DevOps Pipeline Template (azure-pipelines.yml)
+#
+# Flow:
+#   1. Accept host + collection inputs
+#   2. Resolve API host and origin header
+#   3. Trigger collection run via /api/v2/collection/run
+# ============================================================
+
+trigger: none
+pr: none
+
+parameters:
+  - name: cloudHost
+    type: string
+    default: device.pcloudy.com
+  - name: collectionId
+    type: string
+    default: ""
+  - name: collectionConfigId
+    type: string
+    default: ""
+
+variables:
+  - group: pCloudy
+
+stages:
+  - stage: RunCollection
+    displayName: Trigger QPilot Collection Run
+    jobs:
+      - job: Trigger
+        displayName: Trigger Collection
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+
+          - task: Bash@3
+            displayName: Resolve host and origin
+            name: resolve
+            inputs:
+              targetType: inline
+              script: |
+                set -euo pipefail
+
+                HOST="${{ parameters.cloudHost }}"
+
+                case "$HOST" in
+                  "device.pcloudy.com")
+                    API_HOST="qpilot-backend.device.pcloudy.com"
+                    ORIGIN="https://qpilot.device.pcloudy.com"
+                    ;;
+                  "ind-west.pcloudy.com"|"us.pcloudy.com"|"sg.pcloudy.com"|"uae.pcloudy.com")
+                    API_HOST="qpilot-backend.${HOST}"
+                    ORIGIN="https://qpilot.device.pcloudy.com"
+                    ;;
+                  "qpilot-backend.device.pcloudy.com")
+                    API_HOST="qpilot-backend.device.pcloudy.com"
+                    ORIGIN="https://qpilot.device.pcloudy.com"
+                    ;;
+                  *)
+                    echo "Unknown cloudHost: $HOST"
+                    echo "Allowed hosts: device.pcloudy.com, ind-west.pcloudy.com, us.pcloudy.com, sg.pcloudy.com, uae.pcloudy.com, qpilot-backend.device.pcloudy.com"
+                    exit 1
+                    ;;
+                esac
+
+                echo "##vso[task.setvariable variable=inputHost;isOutput=true]$HOST"
+                echo "##vso[task.setvariable variable=apiHost;isOutput=true]$API_HOST"
+                echo "##vso[task.setvariable variable=origin;isOutput=true]$ORIGIN"
+
+          - task: Bash@3
+            displayName: Trigger pCloudy QPilot collection
+            name: trigger
+            env:
+              PCLOUDY_TOKEN: $(pCloudyToken)
+            inputs:
+              targetType: inline
+              script: |
+                set -euo pipefail
+
+                if [ -z "${{ parameters.collectionId }}" ] || [ -z "${{ parameters.collectionConfigId }}" ]; then
+                  echo "collectionId and collectionConfigId are required"
+                  exit 1
+                fi
+
+                if [ -z "$PCLOUDY_TOKEN" ]; then
+                  echo "Missing token variable. Define pCloudyToken in variable group 'pCloudy'."
+                  exit 1
+                fi
+
+                INPUT_HOST="$(resolve.inputHost)"
+                API_HOST="$(resolve.apiHost)"
+                ORIGIN="$(resolve.origin)"
+                REQUEST_PAYLOAD='{"collectionId": "${{ parameters.collectionId }}", "collectionConfigId": "${{ parameters.collectionConfigId }}"}'
+
+                echo "Input Host:           $INPUT_HOST"
+                echo "QPilot Backend Host:  $API_HOST"
+                echo "Origin:               $ORIGIN"
+                echo "Collection ID:        ${{ parameters.collectionId }}"
+                echo "Collection Config ID: ${{ parameters.collectionConfigId }}"
+                echo "Collection run request:"
+                echo "POST https://${API_HOST}/api/v2/collection/run"
+                echo "Headers: content-type=application/json, origin=${ORIGIN}, token=***"
+                echo "Body: $REQUEST_PAYLOAD"
+
+                HTTP_STATUS=$(curl --silent --output /tmp/response.json \
+                  --write-out "%{http_code}" \
+                  --request POST \
+                  --url "https://${API_HOST}/api/v2/collection/run" \
+                  --header "content-type: application/json" \
+                  --header "origin: ${ORIGIN}" \
+                  --header "token: ${PCLOUDY_TOKEN}" \
+                  --data "$REQUEST_PAYLOAD")
+
+                echo "HTTP Status: $HTTP_STATUS"
+                echo "API Response:"
+                cat /tmp/response.json | python3 -m json.tool || cat /tmp/response.json
+
+                if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
+                  echo "Request failed with HTTP $HTTP_STATUS"
+                  exit 1
+                fi

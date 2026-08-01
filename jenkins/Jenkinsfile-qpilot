@@ -1,0 +1,108 @@
+// ============================================================
+// pCloudy QPilot - Run Collection
+// Jenkins Pipeline Template (Declarative)
+//
+// Flow:
+//   1. Accept host + collection inputs
+//   2. Resolve API host and origin header
+//   3. Trigger collection run via /api/v2/collection/run
+// ============================================================
+
+pipeline {
+    agent any
+
+    parameters {
+        string(
+            name: 'CLOUD_HOST',
+            defaultValue: 'device.pcloudy.com',
+            description: 'Host only (no https://). Example: device.pcloudy.com'
+        )
+        string(
+            name: 'COLLECTION_ID',
+            defaultValue: '',
+            description: 'Collection ID'
+        )
+        string(
+            name: 'COLLECTION_CONFIG_ID',
+            defaultValue: '',
+            description: 'Collection Config ID'
+        )
+    }
+
+    environment {
+        PCLOUDY_TOKEN = credentials('pcloudy-token')
+    }
+
+    stages {
+        stage('Trigger pCloudy QPilot Collection') {
+            steps {
+                script {
+                    if (!params.COLLECTION_ID?.trim() || !params.COLLECTION_CONFIG_ID?.trim()) {
+                        error 'COLLECTION_ID and COLLECTION_CONFIG_ID are required'
+                    }
+
+                    def host = params.CLOUD_HOST?.trim()
+                    def apiHost = ''
+                    def origin = ''
+
+                    if (host == 'device.pcloudy.com') {
+                        apiHost = 'qpilot-backend.device.pcloudy.com'
+                        origin = 'https://qpilot.device.pcloudy.com'
+                    } else if (['ind-west.pcloudy.com', 'us.pcloudy.com', 'sg.pcloudy.com', 'uae.pcloudy.com'].contains(host)) {
+                        apiHost = "qpilot-backend.${host}"
+                        origin = 'https://qpilot.device.pcloudy.com'
+                    } else if (host == 'qpilot-backend.device.pcloudy.com') {
+                        apiHost = 'qpilot-backend.device.pcloudy.com'
+                        origin = 'https://qpilot.device.pcloudy.com'
+                    } else {
+                        error "Unknown CLOUD_HOST: ${host}. Allowed: device.pcloudy.com, ind-west.pcloudy.com, us.pcloudy.com, sg.pcloudy.com, uae.pcloudy.com, qpilot-backend.device.pcloudy.com"
+                    }
+
+                    def requestPayload = groovy.json.JsonOutput.toJson([
+                        collectionId: params.COLLECTION_ID,
+                        collectionConfigId: params.COLLECTION_CONFIG_ID
+                    ])
+
+                    echo "Input Host:           ${host}"
+                    echo "QPilot Backend Host:  ${apiHost}"
+                    echo "Origin:               ${origin}"
+                    echo "Collection ID:        ${params.COLLECTION_ID}"
+                    echo "Collection Config ID: ${params.COLLECTION_CONFIG_ID}"
+                    echo 'Collection run request:'
+                    echo "POST https://${apiHost}/api/v2/collection/run"
+                    echo "Headers: content-type=application/json, origin=${origin}, token=***"
+                    echo "Body: ${requestPayload}"
+
+                    def responseBodyFile = 'response.json'
+                    def httpStatus = sh(
+                        script: """
+                            curl --silent --output ${responseBodyFile} \\
+                              --write-out "%{http_code}" \\
+                              --request POST \\
+                              --url "https://${apiHost}/api/v2/collection/run" \\
+                              --header "content-type: application/json" \\
+                              --header "origin: ${origin}" \\
+                              --header "token: ${env.PCLOUDY_TOKEN}" \\
+                              --data '${requestPayload}'
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    echo "HTTP Status: ${httpStatus}"
+                    echo 'API Response:'
+                    sh "python3 -m json.tool ${responseBodyFile} || cat ${responseBodyFile}"
+
+                    if (httpStatus.toInteger() < 200 || httpStatus.toInteger() >= 300) {
+                        error "Request failed with HTTP ${httpStatus}"
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo 'Collection run triggered successfully.'
+        }
+    }
+}

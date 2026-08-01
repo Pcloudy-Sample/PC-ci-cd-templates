@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE suite SYSTEM "http://testng.org/testng-1.0.dtd">
+<suite thread-count="2" configfailurepolicy="continue" name="pCloudy Suite" parallel="tests">
+  <test name="Test-Apple">
+    <parameter name="pCloudyUsername" value="${pCloudyUsername}"/>
+    <parameter name="pCloudyApiKey" value="${pCloudyApiKey}"/>
+    <parameter name="appiumHub" value="${appiumHub}"/>
+    <parameter name="pCloudyDeviceManufacturer" value="${pCloudyDeviceManufacturer}"/>
+    <parameter name="pCloudyApplicationName" value="${pCloudyApplicationName}"/>
+    <classes>
+      <class name="com.pcloudy.testng.Runner"/>
+    </classes>
+  </test> <!-- Test-Apple -->
+
+  <test name="Test-Apple-2">
+    <parameter name="pCloudyUsername" value="${pCloudyUsername}"/>
+    <parameter name="pCloudyApiKey" value="${pCloudyApiKey}"/>
+    <parameter name="appiumHub" value="${appiumHub}"/>
+    <parameter name="pCloudyDeviceManufacturer" value="${pCloudyDeviceManufacturer}"/>
+    <parameter name="pCloudyApplicationName" value="${pCloudyApplicationName}"/>
+    <classes>
+      <class name="com.pcloudy.testng.Runner"/>
+    </classes>
+  </test> <!-- Test-Apple-2 -->
+</suite> <!-- Suite -->

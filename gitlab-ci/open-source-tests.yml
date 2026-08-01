@@ -1,0 +1,221 @@
+# ============================================================
+# pCloudy Device Cloud — Open Source Test Execution
+# GitLab CI/CD Template (.gitlab-ci.yml)
+#
+# Supports: Appium (mobile), Selenium (web), Playwright (web)
+#
+# Required CI/CD Variables (Settings -> CI/CD -> Variables):
+#   PCLOUDY_USERNAME   - your pCloudy account email
+#   PCLOUDY_API_KEY    - API key from pCloudy dashboard (Masked)
+#
+# Optional Variables:
+#   PCLOUDY_APP_PATH   - APK/IPA path in repo (for app_directory upload source)
+#   PCLOUDY_APP_NAME   - existing app name on pCloudy (when upload disabled)
+#   PCLOUDY_APP_STORAGE_URL - app download URL for storage source
+# ============================================================
+
+variables:
+  PCLOUDY_HOST: "device.pcloudy.com"
+  PCLOUDY_API_BASE: "https://device.pcloudy.com/api"
+  PCLOUDY_APPIUM_HUB: "https://device.pcloudy.com/appiumcloud/wd/hub"
+  ENABLE_APP_UPLOAD: "false"
+  APP_UPLOAD_SOURCE: "app_directory" # app_directory | storage
+  APP_STORAGE_URL: "${PCLOUDY_APP_STORAGE_URL}"
+  EXISTING_APP_NAME: "${PCLOUDY_APP_NAME}"
+  PLATFORM: "android"                # android | ios
+  IOS_TRUST_APP: "false"
+  RESIGN_POLL_INTERVAL_SEC: "15"
+  RESIGN_TIMEOUT_MIN: "30"
+  DEVICE_MANUFACTURER: "GOOGLE"
+  DEVICE_MANUFACTURERS: "GOOGLE,SAMSUNG"
+  MAVEN_OPTS: "-Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository"
+
+# Cache Maven/npm dependencies between runs
+cache:
+  paths:
+    - .m2/repository/
+    - node_modules/
+
+stages:
+  - upload
+  - test
+  - report
+
+# ── Job 1: Resolve App Name (Upload or Existing) ─────────────
+resolve-app:
+  stage: upload
+  image: python:3.11-alpine
+  script:
+    - apk add --no-cache curl bash
+    - |
+      set -e
+      TOKEN=""
+      APP_NAME=""
+      ACCESS_ENDPOINT="https://${PCLOUDY_HOST}/api/access"
+
+      if [ "${ENABLE_APP_UPLOAD}" = "true" ]; then
+        RESPONSE=$(curl -s -u "${PCLOUDY_USERNAME}:${PCLOUDY_API_KEY}" "$ACCESS_ENDPOINT")
+        TOKEN=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print((d.get('result') or {}).get('token') or d.get('token') or '')")
+        if [ -z "$TOKEN" ]; then
+          echo "Unable to fetch API token from /api/access response"
+          echo "$RESPONSE"
+          exit 1
+        fi
+
+        if [ "${APP_UPLOAD_SOURCE}" = "storage" ]; then
+          STORAGE_URL="${APP_STORAGE_URL}"
+          if [ -z "$STORAGE_URL" ]; then
+            echo "APP_STORAGE_URL (or PCLOUDY_APP_STORAGE_URL variable) is required for storage source"
+            exit 1
+          fi
+          mkdir -p "$CI_PROJECT_DIR/.tmp/app"
+          FILE_NAME=$(basename "${STORAGE_URL%%\?*}")
+          if [ -z "$FILE_NAME" ] || [ "$FILE_NAME" = "/" ]; then
+            FILE_NAME="app-under-test.apk"
+          fi
+          APP_PATH="$CI_PROJECT_DIR/.tmp/app/$FILE_NAME"
+          curl -fL "$STORAGE_URL" -o "$APP_PATH"
+        else
+          if [ -z "${PCLOUDY_APP_PATH}" ]; then
+            echo "PCLOUDY_APP_PATH variable is required when APP_UPLOAD_SOURCE=app_directory"
+            exit 1
+          fi
+          APP_PATH="$CI_PROJECT_DIR/${PCLOUDY_APP_PATH}"
+        fi
+
+        if [ ! -f "$APP_PATH" ]; then
+          echo "App file not found at: $APP_PATH"
+          exit 1
+        fi
+
+        RESPONSE=$(curl -s -X POST \
+          -F "file=@${APP_PATH}" \
+          -F "source_type=raw" \
+          -F "token=${TOKEN}" \
+          -F "filter=all" \
+          "https://${PCLOUDY_HOST}/api/upload_file")
+        APP_NAME=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); r=d.get('result') or {}; print(r.get('file') or r.get('name') or d.get('file') or d.get('name') or '')")
+      else
+        APP_NAME="${EXISTING_APP_NAME}"
+      fi
+
+      if [ "${ENABLE_APP_UPLOAD}" != "true" ] && [ -z "$APP_NAME" ]; then
+        echo "Upload disabled but application name is missing."
+        echo "Set EXISTING_APP_NAME or PCLOUDY_APP_NAME variable."
+        exit 1
+      fi
+
+      if [ -z "$APP_NAME" ]; then
+        echo "App name is empty."
+        exit 1
+      fi
+
+      if [ "${PLATFORM}" = "ios" ] && [ "${IOS_TRUST_APP}" != "true" ] && [[ "$APP_NAME" == *.ipa ]]; then
+        POLL_INTERVAL="${RESIGN_POLL_INTERVAL_SEC}"
+        TIMEOUT_MIN="${RESIGN_TIMEOUT_MIN}"
+        if ! [[ "$POLL_INTERVAL" =~ ^[0-9]+$ ]] || [ "$POLL_INTERVAL" -le 0 ]; then
+          POLL_INTERVAL=15
+        fi
+        if ! [[ "$TIMEOUT_MIN" =~ ^[0-9]+$ ]] || [ "$TIMEOUT_MIN" -le 0 ]; then
+          TIMEOUT_MIN=30
+        fi
+
+        if [ -z "$TOKEN" ]; then
+          RESPONSE=$(curl -s -u "${PCLOUDY_USERNAME}:${PCLOUDY_API_KEY}" "$ACCESS_ENDPOINT")
+          TOKEN=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print((d.get('result') or {}).get('token') or d.get('token') or '')")
+        fi
+
+        if [ -z "$TOKEN" ]; then
+          echo "Unable to fetch API token for iOS resign"
+          exit 1
+        fi
+
+        INIT_PAYLOAD=$(python3 -c 'import json,sys; print(json.dumps({"token": sys.argv[1], "filename": sys.argv[2]}))' "$TOKEN" "$APP_NAME")
+        INIT_RESPONSE=$(curl -s -X POST "https://${PCLOUDY_HOST}/api/resign/initiate" \
+          -H "Content-Type: application/json" \
+          -d "$INIT_PAYLOAD")
+
+        RESIGN_TOKEN=$(echo "$INIT_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); r=d.get('result') or {}; print(r.get('resign_token') or '')")
+        RESIGN_FILE=$(echo "$INIT_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); r=d.get('result') or {}; print(r.get('resign_filename') or '')")
+
+        if [ -z "$RESIGN_TOKEN" ] || [ -z "$RESIGN_FILE" ]; then
+          echo "Failed to initiate iOS resign"
+          echo "$INIT_RESPONSE"
+          exit 1
+        fi
+
+        APP_NAME="$RESIGN_FILE"
+        MAX_WAIT_SEC=$((TIMEOUT_MIN * 60))
+        START_TS=$(date +%s)
+        while true; do
+          PROGRESS_PAYLOAD=$(python3 -c 'import json,sys; print(json.dumps({"token": sys.argv[1], "resign_token": sys.argv[2], "filename": sys.argv[3]}))' "$TOKEN" "$RESIGN_TOKEN" "$APP_NAME")
+          PROGRESS_RESPONSE=$(curl -s -X POST "https://${PCLOUDY_HOST}/api/resign/progress" \
+            -H "Content-Type: application/json" \
+            -d "$PROGRESS_PAYLOAD")
+          RESIGN_STATUS=$(echo "$PROGRESS_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); r=d.get('result') or {}; print(int(r.get('resign_status') or 0))")
+          NOW_TS=$(date +%s)
+          ELAPSED=$((NOW_TS - START_TS))
+          if [ "$RESIGN_STATUS" -ge 100 ]; then
+            break
+          fi
+          if [ "$ELAPSED" -ge "$MAX_WAIT_SEC" ]; then
+            echo "iOS resign did not reach 100% within ${TIMEOUT_MIN} minute(s)"
+            echo "$PROGRESS_RESPONSE"
+            exit 1
+          fi
+          sleep "$POLL_INTERVAL"
+        done
+      fi
+
+      echo "APP_NAME=$APP_NAME" >> app.env
+      echo "Resolved app: $APP_NAME"
+  artifacts:
+    reports:
+      dotenv: app.env
+    expire_in: 1 hour
+
+# ── Job 2: Run Tests (TestNG parallel in suite) ─────────────
+run-tests:
+  stage: test
+  image: maven:3.9-eclipse-temurin-17
+  needs:
+    - job: resolve-app
+      artifacts: true
+  script:
+    - |
+      mvn test \
+        -Dplatform=$PLATFORM \
+        -DappiumHub=$PCLOUDY_APPIUM_HUB \
+        -DpCloudyUsername=$PCLOUDY_USERNAME \
+        -DpCloudyApiKey=$PCLOUDY_API_KEY \
+        -DappiumTrust=$IOS_TRUST_APP \
+        -DpCloudyDeviceManufacturer=$DEVICE_MANUFACTURER \
+        -DpCloudyDeviceManufacturers="$DEVICE_MANUFACTURERS" \
+        -DpCloudyApplicationName="$APP_NAME"
+
+      # WebdriverIO:
+      # npm ci && npx wdio run wdio.conf.js --manufacturer "$DEVICE_MANUFACTURER"
+
+      # Playwright (web):
+      # pip install playwright pytest-playwright && playwright install chromium && pytest tests/ -v
+
+  artifacts:
+    when: always
+    paths:
+      - target/surefire-reports/
+      - test-results/
+      - playwright-report/
+    reports:
+      junit: target/surefire-reports/*.xml
+    expire_in: 7 days
+
+# ── Aggregate Report ──────────────────────────────────────────
+report:
+  stage: report
+  image: alpine:latest
+  needs:
+    - run-tests
+  when: always
+  script:
+    - echo "Test run complete — check GitLab test report tab"
+    - echo "Execution ratio target: >90%"

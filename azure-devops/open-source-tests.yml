@@ -1,0 +1,404 @@
+# ============================================================
+# pCloudy Device Cloud — Open Source Test Execution
+# Azure DevOps Pipeline Template (azure-pipelines.yml)
+#
+# This template mirrors CI-CD-Templates/github-actions/open-source-tests.yml
+# with Azure DevOps equivalents for trigger, runtime inputs, app resolution,
+# optional iOS resign, Maven execution, and result publication.
+#
+# Required Variable Group (Library -> Variable Groups -> "pCloudy"):
+#   pCloudyUsername          - your pCloudy account email
+#   pCloudyApiKey            - API key from pCloudy dashboard (secret)
+#
+# Optional Variables in variable group (recommended):
+#   pCloudyAppPath           - app path relative to repo root
+#   pCloudyAppName           - existing app name when upload is disabled
+#   pCloudyAppStorageUrl     - storage URL when appUploadSource=storage
+# ============================================================
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+      - feat/ci-end-to-end-flow
+
+pr:
+  branches:
+    include:
+      - main
+
+parameters:
+  - name: cloudHost
+    type: string
+    default: device.pcloudy.com
+  - name: enableAppUpload
+    type: string
+    default: "false"
+    values:
+      - "true"
+      - "false"
+  - name: appUploadSource
+    type: string
+    default: app_directory
+    values:
+      - app_directory
+      - storage
+  - name: appStorageUrl
+    type: string
+    default: ""
+  - name: existingAppName
+    type: string
+    default: ""
+  - name: platform
+    type: string
+    default: android
+    values:
+      - android
+      - ios
+  - name: iosTrustApp
+    type: string
+    default: "false"
+    values:
+      - "true"
+      - "false"
+  - name: resignPollIntervalSec
+    type: string
+    default: "15"
+  - name: resignTimeoutMin
+    type: string
+    default: "30"
+  - name: deviceManufacturer
+    type: string
+    default: GOOGLE
+  - name: deviceManufacturers
+    type: string
+    default: GOOGLE,SAMSUNG
+
+variables:
+  - group: pCloudy
+  - name: pCloudyApiBase
+    value: https://${{ parameters.cloudHost }}/api
+  - name: pCloudyHub
+    value: https://${{ parameters.cloudHost }}/appiumcloud/wd/hub
+  - name: enableAppUpload
+    value: ${{ parameters.enableAppUpload }}
+  - name: appUploadSource
+    value: ${{ parameters.appUploadSource }}
+  - name: appStorageUrl
+    value: ${{ parameters.appStorageUrl }}
+  - name: existingAppName
+    value: ${{ parameters.existingAppName }}
+  - name: platform
+    value: ${{ parameters.platform }}
+  - name: iosTrustApp
+    value: ${{ parameters.iosTrustApp }}
+  - name: resignPollIntervalSec
+    value: ${{ parameters.resignPollIntervalSec }}
+  - name: resignTimeoutMin
+    value: ${{ parameters.resignTimeoutMin }}
+  - name: deviceManufacturer
+    value: ${{ parameters.deviceManufacturer }}
+  - name: deviceManufacturers
+    value: ${{ parameters.deviceManufacturers }}
+
+stages:
+  # Stage 1: Resolve app name (upload or existing) and optional iOS resign.
+  - stage: UploadApp
+    displayName: Upload App to pCloudy
+    jobs:
+      - job: ResolveApp
+        displayName: Resolve App Name
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+
+          - task: Bash@3
+            displayName: Resolve app name (upload or existing)
+            name: resolve
+            env:
+              PCLOUDY_USERNAME: $(pCloudyUsername)
+              PCLOUDY_API_KEY: $(pCloudyApiKey)
+              CLOUD_HOST: ${{ parameters.cloudHost }}
+              ENABLE_APP_UPLOAD: $(enableAppUpload)
+              APP_UPLOAD_SOURCE: $(appUploadSource)
+              INPUT_APP_STORAGE_URL: $(appStorageUrl)
+              VAR_APP_STORAGE_URL: $(pCloudyAppStorageUrl)
+              INPUT_EXISTING_APP_NAME: $(existingAppName)
+              VAR_EXISTING_APP_NAME: $(pCloudyAppName)
+              APP_PATH_REL: $(pCloudyAppPath)
+              PLATFORM: $(platform)
+              IOS_TRUST_APP: $(iosTrustApp)
+              RESIGN_POLL_INTERVAL_SEC: $(resignPollIntervalSec)
+              RESIGN_TIMEOUT_MIN: $(resignTimeoutMin)
+            inputs:
+              targetType: inline
+              script: |
+                set -euo pipefail
+
+                ACCESS_ENDPOINT="https://${CLOUD_HOST}/api/access"
+                TOKEN=""
+                APP_NAME=""
+
+                # Prefer queue-time value, then variable-group fallback.
+                APP_STORAGE_URL="$INPUT_APP_STORAGE_URL"
+                if [ -z "$APP_STORAGE_URL" ]; then
+                  APP_STORAGE_URL="$VAR_APP_STORAGE_URL"
+                fi
+
+                EXISTING_APP_NAME="$INPUT_EXISTING_APP_NAME"
+                if [ -z "$EXISTING_APP_NAME" ]; then
+                  EXISTING_APP_NAME="$VAR_EXISTING_APP_NAME"
+                fi
+
+                if [ "$ENABLE_APP_UPLOAD" = "true" ]; then
+                  RESPONSE=$(curl -sS -u "$PCLOUDY_USERNAME:$PCLOUDY_API_KEY" "$ACCESS_ENDPOINT")
+                  TOKEN=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print((d.get('result') or {}).get('token') or d.get('token') or '')")
+                  if [ -z "$TOKEN" ]; then
+                    echo "Unable to fetch API token from /api/access response"
+                    echo "$RESPONSE"
+                    exit 1
+                  fi
+
+                  if [ "$APP_UPLOAD_SOURCE" = "storage" ]; then
+                    if [ -z "$APP_STORAGE_URL" ]; then
+                      echo "appStorageUrl parameter (or pCloudyAppStorageUrl variable) is required for storage source"
+                      exit 1
+                    fi
+                    mkdir -p "$(Agent.TempDirectory)/app"
+                    FILE_NAME=$(basename "${APP_STORAGE_URL%%\?*}")
+                    if [ -z "$FILE_NAME" ] || [ "$FILE_NAME" = "/" ]; then
+                      FILE_NAME="app-under-test.apk"
+                    fi
+                    APP_PATH="$(Agent.TempDirectory)/app/$FILE_NAME"
+                    curl -fLsS "$APP_STORAGE_URL" -o "$APP_PATH"
+                  else
+                    if [ -z "$APP_PATH_REL" ]; then
+                      echo "pCloudyAppPath variable is required when appUploadSource=app_directory"
+                      exit 1
+                    fi
+                    APP_PATH="$(Build.SourcesDirectory)/$APP_PATH_REL"
+                  fi
+
+                  if [ ! -f "$APP_PATH" ]; then
+                    echo "App file not found at: $APP_PATH"
+                    exit 1
+                  fi
+
+                  RESPONSE=$(curl -sS -X POST \
+                    -F "file=@${APP_PATH}" \
+                    -F "source_type=raw" \
+                    -F "token=${TOKEN}" \
+                    -F "filter=all" \
+                    "https://${CLOUD_HOST}/api/upload_file")
+
+                  APP_NAME=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); r=d.get('result') or {}; print(r.get('file') or r.get('name') or d.get('file') or d.get('name') or '')")
+                else
+                  APP_NAME="$EXISTING_APP_NAME"
+                fi
+
+                if [ "$ENABLE_APP_UPLOAD" != "true" ] && [ -z "$APP_NAME" ]; then
+                  echo "Upload disabled but application name is missing."
+                  echo "Set existingAppName parameter or pCloudyAppName variable."
+                  exit 1
+                fi
+
+                if [ -z "$APP_NAME" ]; then
+                  echo "App name is empty."
+                  exit 1
+                fi
+
+                # iOS resign flow for non-trusted IPA apps.
+                if [ "$PLATFORM" = "ios" ] && [ "$IOS_TRUST_APP" != "true" ] && [[ "$APP_NAME" == *.ipa ]]; then
+                  POLL_INTERVAL="$RESIGN_POLL_INTERVAL_SEC"
+                  TIMEOUT_MIN="$RESIGN_TIMEOUT_MIN"
+
+                  if ! [[ "$POLL_INTERVAL" =~ ^[0-9]+$ ]] || [ "$POLL_INTERVAL" -le 0 ]; then
+                    POLL_INTERVAL=15
+                  fi
+                  if ! [[ "$TIMEOUT_MIN" =~ ^[0-9]+$ ]] || [ "$TIMEOUT_MIN" -le 0 ]; then
+                    TIMEOUT_MIN=30
+                  fi
+
+                  if [ -z "$TOKEN" ]; then
+                    RESPONSE=$(curl -sS -u "$PCLOUDY_USERNAME:$PCLOUDY_API_KEY" "$ACCESS_ENDPOINT")
+                    TOKEN=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print((d.get('result') or {}).get('token') or d.get('token') or '')")
+                  fi
+
+                  if [ -z "$TOKEN" ]; then
+                    echo "Unable to fetch API token for iOS resign"
+                    exit 1
+                  fi
+
+                  INIT_PAYLOAD=$(python3 -c 'import json,sys; print(json.dumps({"token": sys.argv[1], "filename": sys.argv[2]}))' "$TOKEN" "$APP_NAME")
+                  INIT_RESPONSE=$(curl -sS -X POST "https://${CLOUD_HOST}/api/resign/initiate" \
+                    -H "Content-Type: application/json" \
+                    -d "$INIT_PAYLOAD")
+
+                  RESIGN_TOKEN=$(echo "$INIT_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); r=d.get('result') or {}; print(r.get('resign_token') or '')")
+                  RESIGN_FILE=$(echo "$INIT_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); r=d.get('result') or {}; print(r.get('resign_filename') or '')")
+
+                  if [ -z "$RESIGN_TOKEN" ] || [ -z "$RESIGN_FILE" ]; then
+                    echo "Failed to initiate iOS resign"
+                    echo "$INIT_RESPONSE"
+                    exit 1
+                  fi
+
+                  APP_NAME="$RESIGN_FILE"
+
+                  MAX_WAIT_SEC=$((TIMEOUT_MIN * 60))
+                  START_TS=$(date +%s)
+                  ATTEMPT=0
+
+                  while true; do
+                    ATTEMPT=$((ATTEMPT + 1))
+                    PROGRESS_PAYLOAD=$(python3 -c 'import json,sys; print(json.dumps({"token": sys.argv[1], "resign_token": sys.argv[2], "filename": sys.argv[3]}))' "$TOKEN" "$RESIGN_TOKEN" "$APP_NAME")
+
+                    PROGRESS_RESPONSE=$(curl -sS -X POST "https://${CLOUD_HOST}/api/resign/progress" \
+                      -H "Content-Type: application/json" \
+                      -d "$PROGRESS_PAYLOAD")
+
+                    RESIGN_STATUS=$(echo "$PROGRESS_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); r=d.get('result') or {}; print(int(r.get('resign_status') or 0))")
+                    NOW_TS=$(date +%s)
+                    ELAPSED=$((NOW_TS - START_TS))
+                    REMAINING=$((MAX_WAIT_SEC - ELAPSED))
+                    if [ "$REMAINING" -lt 0 ]; then
+                      REMAINING=0
+                    fi
+
+                    echo "Resign progress: ${RESIGN_STATUS}% (attempt $ATTEMPT, elapsed ${ELAPSED}s, remaining ${REMAINING}s)"
+
+                    if [ "$RESIGN_STATUS" -ge 100 ]; then
+                      break
+                    fi
+
+                    if [ "$ELAPSED" -ge "$MAX_WAIT_SEC" ]; then
+                      echo "iOS resign did not reach 100% within ${TIMEOUT_MIN} minute(s)"
+                      echo "$PROGRESS_RESPONSE"
+                      exit 1
+                    fi
+
+                    sleep "$POLL_INTERVAL"
+                  done
+                fi
+
+                echo "Using app: $APP_NAME"
+                echo "##vso[task.setvariable variable=appName;isOutput=true]$APP_NAME"
+
+  - stage: RunTests
+    displayName: Run Tests
+    dependsOn: UploadApp
+    variables:
+      resolvedAppName: $[ stageDependencies.UploadApp.ResolveApp.outputs['resolve.appName'] ]
+    jobs:
+      - job: Run
+        displayName: Run Appium tests on pCloudy
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+
+          - task: UseJavaVersion@1
+            displayName: Set up Java 17
+            inputs:
+              versionSpec: "17"
+              architecture: x64
+
+          - task: Bash@3
+            displayName: Run Maven tests
+            env:
+              PCLOUDY_USERNAME: $(pCloudyUsername)
+              PCLOUDY_API_KEY: $(pCloudyApiKey)
+              PCLOUDY_APP_NAME: $(resolvedAppName)
+              APPIUM_HUB: $(pCloudyHub)
+              IOS_TRUST_APP: $(iosTrustApp)
+              DEVICE_MANUFACTURER: $(deviceManufacturer)
+              DEVICE_MANUFACTURERS: $(deviceManufacturers)
+            inputs:
+              targetType: inline
+              script: |
+                set -euo pipefail
+
+                mvn test -Dplatform=$(platform) \
+                         -DappiumHub="$APPIUM_HUB" \
+                         -DpCloudyUsername="$PCLOUDY_USERNAME" \
+                         -DpCloudyApiKey="$PCLOUDY_API_KEY" \
+                         -DappiumTrust="$IOS_TRUST_APP" \
+                         -DpCloudyDeviceManufacturer="$DEVICE_MANUFACTURER" \
+                         -DpCloudyDeviceManufacturers="$DEVICE_MANUFACTURERS" \
+                         -DpCloudyApplicationName="$PCLOUDY_APP_NAME"
+
+          - task: Bash@3
+            displayName: Collect report directories
+            condition: always()
+            inputs:
+              targetType: inline
+              script: |
+                set -euo pipefail
+
+                DEST="$(Build.ArtifactStagingDirectory)/test-results"
+                mkdir -p "$DEST"
+
+                if [ -d "$(Build.SourcesDirectory)/target/surefire-reports" ]; then
+                  cp -R "$(Build.SourcesDirectory)/target/surefire-reports" "$DEST/"
+                fi
+
+                if [ -d "$(Build.SourcesDirectory)/test-results" ]; then
+                  cp -R "$(Build.SourcesDirectory)/test-results" "$DEST/"
+                fi
+
+                if [ -d "$(Build.SourcesDirectory)/playwright-report" ]; then
+                  cp -R "$(Build.SourcesDirectory)/playwright-report" "$DEST/"
+                fi
+
+          - task: PublishPipelineArtifact@1
+            displayName: Publish test artifacts
+            condition: always()
+            inputs:
+              targetPath: $(Build.ArtifactStagingDirectory)/test-results
+              artifact: test-results
+              publishLocation: pipeline
+
+          - task: PublishTestResults@2
+            displayName: Publish JUnit results
+            condition: always()
+            inputs:
+              testResultsFormat: JUnit
+              testResultsFiles: "**/surefire-reports/*.xml"
+              mergeTestResults: true
+              testRunTitle: pCloudy Device Cloud - $(Build.BuildNumber)
+
+  - stage: Report
+    displayName: Aggregate Test Results
+    dependsOn: RunTests
+    condition: always()
+    variables:
+      resolvedAppName: $[ stageDependencies.UploadApp.ResolveApp.outputs['resolve.appName'] ]
+    jobs:
+      - job: Summary
+        displayName: Generate summary report
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: Bash@3
+            displayName: Upload build summary
+            inputs:
+              targetType: inline
+              script: |
+                set -euo pipefail
+
+                SUMMARY_FILE="$(Agent.TempDirectory)/pcloudy-summary.md"
+
+                {
+                  echo "## pCloudy Test Results"
+                  echo ""
+                  echo "- Platform: $(platform)"
+                  echo "- App: $(resolvedAppName)"
+                  echo "- Manufacturer fallback: $(deviceManufacturer)"
+                  echo "- Manufacturers list: $(deviceManufacturers)"
+                  echo ""
+                  echo "Execution ratio target: >90%"
+                } > "$SUMMARY_FILE"
+
+                echo "##vso[task.uploadsummary]$SUMMARY_FILE"

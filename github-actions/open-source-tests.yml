@@ -1,0 +1,342 @@
+# ============================================================
+# pCloudy Device Cloud — Open Source Test Execution
+# GitHub Actions Template
+#
+# Supports: Appium (mobile), Selenium (web), Playwright (web)
+# Trigger:  Push to main/develop, PRs, or manual dispatch
+#
+# Required Secrets (Settings → Secrets → Actions):
+#   PCLOUDY_USERNAME   - your pCloudy account email
+#   PCLOUDY_API_KEY    - API key from pCloudy dashboard
+#
+# Required Variables (Settings → Variables):
+#   PCLOUDY_APP_PATH   - path to your APK/IPA in the repo
+#   PCLOUDY_PLATFORM   - android | ios
+# ============================================================
+
+name: pCloudy — Open Source Test Execution
+
+on:
+  push:
+    branches: [main, develop, feat/ci-end-to-end-flow]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      cloud_host:
+        description: "pCloudy host (without protocol), e.g. device.pcloudy.com"
+        required: false
+        default: "device.pcloudy.com"
+      enable_app_upload:
+        description: "Upload app to pCloudy (true/false). Set false to use existing app name."
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+      app_upload_source:
+        description: "Source for app upload when enabled: app_directory or storage"
+        required: false
+        default: "app_directory"
+        type: choice
+        options: ["app_directory", "storage"]
+      app_storage_url:
+        description: "Direct download URL for app when app_upload_source=storage"
+        required: false
+        default: ""
+      existing_app_name:
+        description: "Existing pCloudy app name to use when upload is disabled"
+        required: false
+        default: ""
+      platform:
+        description: "Target platform"
+        required: true
+        default: "android"
+        type: choice
+        options: [android, ios]
+      ios_trust_app:
+        description: "For iOS only: true for trusted enterprise app (skip resign), false to resign IPA"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+      resign_poll_interval_sec:
+        description: "For iOS resign: poll interval in seconds"
+        required: false
+        default: "15"
+      resign_timeout_min:
+        description: "For iOS resign: max wait time in minutes"
+        required: false
+        default: "30"
+      device_manufacturer:
+        description: "Single device manufacturer fallback for capability-based allocation"
+        required: false
+        default: "GOOGLE"
+      device_manufacturers:
+        description: "Comma-separated manufacturers mapped to TestNG tests by order, e.g. GOOGLE,SAMSUNG"
+        required: false
+        default: "GOOGLE,SAMSUNG"
+
+env:
+  PCLOUDY_HOST: ${{ github.event.inputs.cloud_host || 'device.pcloudy.com' }}
+  PCLOUDY_API_BASE: https://${{ github.event.inputs.cloud_host || 'device.pcloudy.com' }}/api
+  PCLOUDY_APPIUM_HUB: https://${{ github.event.inputs.cloud_host || 'device.pcloudy.com' }}/appiumcloud/wd/hub
+  ENABLE_APP_UPLOAD: ${{ github.event.inputs.enable_app_upload || 'false' }}
+  APP_UPLOAD_SOURCE: ${{ github.event.inputs.app_upload_source || 'app_directory' }}
+  APP_STORAGE_URL: ${{ github.event.inputs.app_storage_url || secrets.PCLOUDY_APP_STORAGE_URL || '' }}
+  EXISTING_APP_NAME: ${{ github.event.inputs.existing_app_name || vars.PCLOUDY_APP_NAME || '' }}
+  PLATFORM: ${{ github.event.inputs.platform || 'android' }}
+  IOS_TRUST_APP: ${{ github.event.inputs.ios_trust_app || 'false' }}
+  RESIGN_POLL_INTERVAL_SEC: ${{ github.event.inputs.resign_poll_interval_sec || '15' }}
+  RESIGN_TIMEOUT_MIN: ${{ github.event.inputs.resign_timeout_min || '30' }}
+  DEVICE_MANUFACTURER: ${{ github.event.inputs.device_manufacturer || 'GOOGLE' }}
+  DEVICE_MANUFACTURERS: ${{ github.event.inputs.device_manufacturers || 'GOOGLE,SAMSUNG' }}
+
+jobs:
+  # ─── Step 1: Resolve App on pCloudy Drive ─────────────────
+  upload-app:
+    name: Upload App to pCloudy
+    runs-on: ubuntu-latest
+    environment: SECRET
+    outputs:
+      app_name: ${{ steps.resolve_app.outputs.app_name }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Resolve app name (upload or existing)
+        id: resolve_app
+        run: |
+          TOKEN=""
+          APP_NAME_SOURCE=""
+          ACCESS_ENDPOINT="https://${{ env.PCLOUDY_HOST }}/api/access"
+
+          if [ "${{ env.ENABLE_APP_UPLOAD }}" = "true" ]; then
+            RESPONSE=$(curl -s -u "${{ secrets.PCLOUDY_USERNAME }}:${{ secrets.PCLOUDY_API_KEY }}" "$ACCESS_ENDPOINT")
+            TOKEN=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print((d.get('result') or {}).get('token') or d.get('token') or '')")
+            if [ -z "$TOKEN" ]; then
+              echo "Unable to fetch API token from /api/access response"
+              echo "$RESPONSE"
+              exit 1
+            fi
+
+            if [ "${{ env.APP_UPLOAD_SOURCE }}" = "storage" ]; then
+              STORAGE_URL="${{ env.APP_STORAGE_URL }}"
+              if [ -z "$STORAGE_URL" ]; then
+                echo "app_storage_url input (or PCLOUDY_APP_STORAGE_URL secret) is required for storage source"
+                exit 1
+              fi
+              mkdir -p "$RUNNER_TEMP/app"
+              FILE_NAME=$(basename "${STORAGE_URL%%\?*}")
+              if [ -z "$FILE_NAME" ] || [ "$FILE_NAME" = "/" ]; then
+                FILE_NAME="app-under-test.apk"
+              fi
+              APP_PATH="$RUNNER_TEMP/app/$FILE_NAME"
+              curl -fL "$STORAGE_URL" -o "$APP_PATH"
+            else
+              APP_PATH="${{ github.workspace }}/${{ vars.PCLOUDY_APP_PATH }}"
+            fi
+
+            if [ ! -f "$APP_PATH" ]; then
+              echo "App file not found at: $APP_PATH"
+              exit 1
+            fi
+
+            RESPONSE=$(curl -s -X POST \
+              -F "file=@${APP_PATH}" \
+              -F "source_type=raw" \
+              -F "token=${TOKEN}" \
+              -F "filter=all" \
+              "https://${{ env.PCLOUDY_HOST }}/api/upload_file")
+            APP_NAME=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); r=d.get('result') or {}; print(r.get('file') or r.get('name') or d.get('file') or d.get('name') or '')")
+            APP_NAME_SOURCE="upload_api"
+          else
+            APP_NAME="${{ env.EXISTING_APP_NAME }}"
+            APP_NAME_SOURCE="existing_app_name"
+          fi
+
+          if [ "${{ env.ENABLE_APP_UPLOAD }}" != "true" ] && [ -z "$APP_NAME" ]; then
+            echo "Upload disabled but application name is missing."
+            echo "Set workflow input 'existing_app_name' or repository variable 'PCLOUDY_APP_NAME'."
+            exit 1
+          fi
+
+          if [ -z "$APP_NAME" ]; then
+            echo "App name is empty."
+            echo "If upload is disabled, set existing_app_name input or PCLOUDY_APP_NAME variable."
+            exit 1
+          fi
+
+          # iOS resign flow: required for non-trusted IPA apps.
+          if [ "${{ env.PLATFORM }}" = "ios" ] && [ "${{ env.IOS_TRUST_APP }}" != "true" ] && [[ "$APP_NAME" == *.ipa ]]; then
+            POLL_INTERVAL="${{ env.RESIGN_POLL_INTERVAL_SEC }}"
+            TIMEOUT_MIN="${{ env.RESIGN_TIMEOUT_MIN }}"
+            if ! [[ "$POLL_INTERVAL" =~ ^[0-9]+$ ]] || [ "$POLL_INTERVAL" -le 0 ]; then
+              POLL_INTERVAL=15
+            fi
+            if ! [[ "$TIMEOUT_MIN" =~ ^[0-9]+$ ]] || [ "$TIMEOUT_MIN" -le 0 ]; then
+              TIMEOUT_MIN=30
+            fi
+
+            if [ -z "$TOKEN" ]; then
+              RESPONSE=$(curl -s -u "${{ secrets.PCLOUDY_USERNAME }}:${{ secrets.PCLOUDY_API_KEY }}" "$ACCESS_ENDPOINT")
+              TOKEN=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print((d.get('result') or {}).get('token') or d.get('token') or '')")
+            fi
+
+            if [ -z "$TOKEN" ]; then
+              echo "Unable to fetch API token for iOS resign"
+              exit 1
+            fi
+
+            INIT_PAYLOAD=$(python3 -c 'import json,sys; print(json.dumps({"token": sys.argv[1], "filename": sys.argv[2]}))' "$TOKEN" "$APP_NAME")
+
+            INIT_RESPONSE=$(curl -s -X POST "https://${{ env.PCLOUDY_HOST }}/api/resign/initiate" \
+              -H "Content-Type: application/json" \
+              -d "$INIT_PAYLOAD")
+
+            RESIGN_TOKEN=$(echo "$INIT_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); r=d.get('result') or {}; print(r.get('resign_token') or '')")
+            RESIGN_FILE=$(echo "$INIT_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); r=d.get('result') or {}; print(r.get('resign_filename') or '')")
+
+            if [ -z "$RESIGN_TOKEN" ] || [ -z "$RESIGN_FILE" ]; then
+              echo "Failed to initiate iOS resign"
+              echo "$INIT_RESPONSE"
+              exit 1
+            fi
+
+            echo "Resign initiated for: $RESIGN_FILE"
+            APP_NAME="$RESIGN_FILE"
+            APP_NAME_SOURCE="resign_api"
+
+            MAX_WAIT_SEC=$((TIMEOUT_MIN * 60))
+            START_TS=$(date +%s)
+            ATTEMPT=0
+
+            while true; do
+              ATTEMPT=$((ATTEMPT + 1))
+              PROGRESS_PAYLOAD=$(python3 -c 'import json,sys; print(json.dumps({"token": sys.argv[1], "resign_token": sys.argv[2], "filename": sys.argv[3]}))' "$TOKEN" "$RESIGN_TOKEN" "$APP_NAME")
+
+              PROGRESS_RESPONSE=$(curl -s -X POST "https://${{ env.PCLOUDY_HOST }}/api/resign/progress" \
+                -H "Content-Type: application/json" \
+                -d "$PROGRESS_PAYLOAD")
+
+              RESIGN_STATUS=$(echo "$PROGRESS_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); r=d.get('result') or {}; print(int(r.get('resign_status') or 0))")
+              NOW_TS=$(date +%s)
+              ELAPSED=$((NOW_TS - START_TS))
+              REMAINING=$((MAX_WAIT_SEC - ELAPSED))
+              if [ "$REMAINING" -lt 0 ]; then
+                REMAINING=0
+              fi
+              echo "Resign progress: ${RESIGN_STATUS}% (attempt $ATTEMPT, elapsed ${ELAPSED}s, remaining ${REMAINING}s)"
+
+              if [ "$RESIGN_STATUS" -ge 100 ]; then
+                break
+              fi
+
+              if [ "$ELAPSED" -ge "$MAX_WAIT_SEC" ]; then
+                echo "iOS resign did not reach 100% within ${TIMEOUT_MIN} minute(s)"
+                echo "$PROGRESS_RESPONSE"
+                exit 1
+              fi
+
+              sleep "$POLL_INTERVAL"
+            done
+          fi
+
+          echo "app_name=$APP_NAME" >> $GITHUB_OUTPUT
+          echo "Using app: $APP_NAME"
+
+  # ─── Step 2: Run Tests (TestNG Parallel in Suite) ─────────
+  run-tests:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    environment: SECRET
+    needs: [upload-app]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Java (for Appium/TestNG)
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+
+      # ── If using Node.js + WebdriverIO ──
+      # - name: Set up Node.js
+      #   uses: actions/setup-node@v4
+      #   with:
+      #     node-version: "20"
+      # - run: npm ci
+
+      # ── If using Python + Playwright ──
+      # - name: Set up Python
+      #   uses: actions/setup-python@v5
+      #   with:
+      #     python-version: "3.11"
+      # - run: pip install playwright pytest-playwright
+      # - run: playwright install chromium
+
+      - name: Run Appium tests on pCloudy
+        env:
+          PCLOUDY_USERNAME: ${{ secrets.PCLOUDY_USERNAME }}
+          PCLOUDY_API_KEY: ${{ secrets.PCLOUDY_API_KEY }}
+          PCLOUDY_APP_NAME: ${{ needs.upload-app.outputs.app_name }}
+          APPIUM_HUB: ${{ env.PCLOUDY_APPIUM_HUB }}
+          IOS_TRUST_APP: ${{ env.IOS_TRUST_APP }}
+          DEVICE_MANUFACTURER: ${{ env.DEVICE_MANUFACTURER }}
+          DEVICE_MANUFACTURERS: ${{ env.DEVICE_MANUFACTURERS }}
+        run: |
+          # Run your test suite — adjust command for your framework:
+
+          # Maven / TestNG:
+          mvn test -Dplatform=${{ env.PLATFORM }} \
+                   -DappiumHub=$APPIUM_HUB \
+                   -DpCloudyUsername=$PCLOUDY_USERNAME \
+                   -DpCloudyApiKey=$PCLOUDY_API_KEY \
+                   -DappiumTrust=$IOS_TRUST_APP \
+                   -DpCloudyDeviceManufacturer=$DEVICE_MANUFACTURER \
+                   -DpCloudyDeviceManufacturers="$DEVICE_MANUFACTURERS" \
+                   -DpCloudyApplicationName="$PCLOUDY_APP_NAME"
+
+          # WebdriverIO:
+          # npx wdio run wdio.conf.js --manufacturer "$DEVICE_MANUFACTURER"
+
+          # Pytest + Playwright (web):
+          # pytest tests/ -v
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            target/surefire-reports/
+            test-results/
+            playwright-report/
+          retention-days: 14
+
+  # ─── Step 3: Aggregate Results ────────────────────────────
+  report:
+    name: Aggregate Test Results
+    runs-on: ubuntu-latest
+    needs: run-tests
+    if: always()
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-results/
+
+      - name: Generate summary report
+        run: |
+          echo "## pCloudy Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Execution Slot | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------------|--------|" >> $GITHUB_STEP_SUMMARY
+          for dir in all-results/*/; do
+            slot=$(basename "$dir" | sed 's/test-results-slot-//')
+            echo "| $slot | ✅ Completed |" >> $GITHUB_STEP_SUMMARY
+          done
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Execution ratio target: >90%**" >> $GITHUB_STEP_SUMMARY
