@@ -1,9 +1,9 @@
-# pCloudy CI/CD Integration Templates
+# Pcloudy CI/CD Integration Templates
 
-> **Production-ready pipeline templates for running open-source tests and QPilot collection runs on pCloudy's real device cloud.**
+> **Production-ready pipeline templates for running open-source tests and QPilot collection runs on Pcloudy's real device cloud.**
 
 <p align="center">
-	<a href="https://www.pcloudy.com"><img alt="pCloudy" src="https://img.shields.io/badge/Made%20by-pCloudy-1a73e8"></a>
+	<a href="https://www.pcloudy.com"><img alt="Pcloudy" src="https://img.shields.io/badge/Made%20by-Pcloudy-1a73e8"></a>
 	<img alt="Platforms" src="https://img.shields.io/badge/platforms-GitHub%20Actions%20%7C%20Jenkins%20%7C%20GitLab%20CI%20%7C%20Azure%20DevOps-blue">
 	<img alt="Templates" src="https://img.shields.io/badge/templates-8%20ready--to--use-teal">
 	<img alt="License" src="https://img.shields.io/badge/license-MIT-green">
@@ -13,11 +13,9 @@
 
 ## Getting Started
 
-[pCloudy](https://www.pcloudy.com) is a mobile app testing platform that gives you single-click access to real Android and iOS devices directly from your browser. Use these real devices to perform manual and automated testing for your app, and integrate the platform with your CI pipeline for continuous testing across multiple real devices with every build.
+[Pcloudy](https://www.pcloudy.com) is a mobile app testing platform that gives you single-click access to real Android and iOS devices directly from your browser. Use these real devices to perform manual and automated testing for your app, and integrate the platform with your CI pipeline for continuous testing across multiple real devices with every build.
 
-pCloudy is fully integrated with Appium, letting you run your existing Appium test scripts against real devices on the pCloudy cloud with minimal changes.
-
-This project is a plain Java + Maven Appium sample (no test framework) showing how to run Java Appium tests on the pCloudy Real Device Cloud.
+Pcloudy is fully integrated with Appium, letting you run your existing Appium test scripts against real devices on the Pcloudy cloud with minimal changes.
 
 ## What's in this repo
 
@@ -25,7 +23,7 @@ Two categories of templates, across four CI/CD platforms:
 
 | Template type | What it does |
 |---|---|
-| **Open Source Execution** | Runs your existing Appium / Selenium / Playwright tests on pCloudy real devices in parallel |
+| **Open Source Execution** | Runs your existing Appium / Selenium / Playwright tests on Pcloudy real devices in parallel |
 | **QPilot Collection Run** | Triggers an existing QPilot collection run using `collectionId` and `collectionConfigId` |
 
 ---
@@ -45,11 +43,11 @@ Two categories of templates, across four CI/CD platforms:
 
 ### Prerequisites
 
-You need credentials from your [pCloudy dashboard](https://device.pcloudy.com):
+You need credentials from your [Pcloudy dashboard](https://device.pcloudy.com):
 
 | Variable | Where to find it |
 |---|---|
-| `PCLOUDY_USERNAME` | Your pCloudy account email *(Open Source templates)* |
+| `PCLOUDY_USERNAME` | Your Pcloudy account email *(Open Source templates)* |
 | `PCLOUDY_API_KEY` | Settings → API Key *(Open Source templates)* |
 | `PCLOUDY_TOKEN` / `pCloudyToken` / `pcloudy-token` | API token secret/variable in CI *(QPilot templates)* |
 
@@ -149,7 +147,7 @@ Open source templates support all three common enterprise frameworks. Uncomment 
 | Selenium + JUnit | Java 17 | `mvn test -Dsuite=regression` |
 
 See [`docs/framework-capabilities.md`](docs/framework-capabilities.md) for the exact
-pCloudy capability blocks (Appium Android/iOS, Selenium, Playwright JSON) to drop into
+Pcloudy capability blocks (Appium Android/iOS, Selenium, Playwright JSON) to drop into
 your test project's driver setup.
 
 ---
@@ -160,7 +158,7 @@ For BFSI, healthcare, and government teams with data residency requirements:
 
 **On-premise device cloud (Lab-in-a-Box)**
 
-Replace the API base URL with your internal pCloudy endpoint:
+Replace the API base URL with your internal Pcloudy endpoint:
 
 ```yaml
 PCLOUDY_API_BASE: "https://pcloudy.internal.yourcompany.com/api"
@@ -235,9 +233,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Pull requests are welcome — especially
 
 ## Resources
 
-- [pCloudy documentation](https://www.pcloudy.com/docs)
+- [Pcloudy documentation](https://www.pcloudy.com/docs)
 - [QPilot documentation](https://www.pcloudy.com/docs/test-creation-agent/)
-- [pCloudy API reference](https://www.pcloudy.com/docs/api-reference)
+- [Pcloudy API reference](https://www.pcloudy.com/docs/api-reference)
 - [Lab-in-a-Box (on-premise)](https://www.pcloudy.com/docs/on-premise-cloud)
 - [CI/CD Integration Guide](pCloudy_CICD_Integration_Guide.docx) — full setup walkthrough
 
@@ -245,7 +243,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Pull requests are welcome — especially
 
 ## Learn More
 
-- [pCloudy Website](https://www.pcloudy.com)
+- [Pcloudy Website](https://www.pcloudy.com)
 
 
 ## License
@@ -254,5 +252,5 @@ MIT — see [LICENSE](LICENSE).
 
 ---
 
-*Built by [pCloudy](https://www.pcloudy.com) — quality infrastructure for enterprise mobile testing.*
+*Built by [Pcloudy](https://www.pcloudy.com) — quality infrastructure for enterprise mobile testing.*
 
